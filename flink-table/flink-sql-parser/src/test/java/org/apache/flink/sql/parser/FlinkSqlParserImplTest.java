@@ -74,7 +74,151 @@ public class FlinkSqlParserImplTest extends SqlParserTest {
 	}
 
 	@Test
+	public void testShowCatalogs() {
+		check("show catalogs", "SHOW CATALOGS");
+	}
+
+	@Test
+	public void testDescribeCatalog() {
+		check("describe catalog a", "DESCRIBE CATALOG `A`");
+	}
+
+	/**
+	 * Here we override the super method to avoid test error from `describe schema` supported in original calcite.
+	 */
+	@Override
+	public void testDescribeSchema() {
+	}
+
+	@Test
+	public void testUseCatalog() {
+		check("use catalog a", "USE CATALOG `A`");
+	}
+
+	@Test
+	public void testCreateCatalog() {
+		check(
+			"create catalog c1\n" +
+				" WITH (\n" +
+				"  'key1'='value1',\n" +
+				"  'key2'='value2'\n" +
+				" )\n",
+			"CREATE CATALOG `C1` " +
+				"WITH (\n" +
+				"  'key1' = 'value1',\n" +
+				"  'key2' = 'value2'\n" +
+				")");
+	}
+
+	@Test
+	public void testShowDataBases() {
+		check("show databases", "SHOW DATABASES");
+	}
+
+	@Test
+	public void testUseDataBase() {
+		check("use default_db", "USE `DEFAULT_DB`");
+		check("use defaultCatalog.default_db", "USE `DEFAULTCATALOG`.`DEFAULT_DB`");
+	}
+
+	@Test
+	public void testCreateDatabase() {
+		check("create database db1", "CREATE DATABASE `DB1`");
+		check("create database if not exists db1", "CREATE DATABASE IF NOT EXISTS `DB1`");
+		check("create database catalog1.db1", "CREATE DATABASE `CATALOG1`.`DB1`");
+		check("create database db1 comment 'test create database'",
+			"CREATE DATABASE `DB1`\n" +
+			"COMMENT 'test create database'");
+		check("create database db1 comment 'test create database'" +
+			"with ( 'key1' = 'value1', 'key2.a' = 'value2.a')",
+			"CREATE DATABASE `DB1`\n" +
+			"COMMENT 'test create database' WITH (\n" +
+			"  'key1' = 'value1',\n" +
+			"  'key2.a' = 'value2.a'\n" +
+			")");
+	}
+
+	@Test
+	public void testDropDatabase() {
+		check("drop database db1", "DROP DATABASE `DB1` RESTRICT");
+		check("drop database catalog1.db1", "DROP DATABASE `CATALOG1`.`DB1` RESTRICT");
+		check("drop database db1 RESTRICT", "DROP DATABASE `DB1` RESTRICT");
+		check("drop database db1 CASCADE", "DROP DATABASE `DB1` CASCADE");
+	}
+
+	@Test
+	public void testAlterDatabase() {
+		check("alter database db1 set ('key1' = 'value1','key2.a' = 'value2.a')",
+			"ALTER DATABASE `DB1` SET (\n" +
+			"  'key1' = 'value1',\n" +
+			"  'key2.a' = 'value2.a'\n" +
+			")");
+	}
+
+	@Test
+	public void testDescribeDatabase() {
+		check("describe database db1", "DESCRIBE DATABASE `DB1`");
+		check("describe database catlog1.db1", "DESCRIBE DATABASE `CATLOG1`.`DB1`");
+		check("describe database extended db1", "DESCRIBE DATABASE EXTENDED `DB1`");
+	}
+
+	@Test
+	public void testAlterFunction() {
+		check("alter function function1 as 'org.apache.fink.function.function1'",
+			"ALTER FUNCTION `FUNCTION1` AS 'org.apache.fink.function.function1'");
+
+		check("alter temporary function function1 as 'org.apache.fink.function.function1'",
+			"ALTER TEMPORARY FUNCTION `FUNCTION1` AS 'org.apache.fink.function.function1'");
+
+		check("alter temporary function function1 as 'org.apache.fink.function.function1' language scala",
+			"ALTER TEMPORARY FUNCTION `FUNCTION1` AS 'org.apache.fink.function.function1' LANGUAGE SCALA");
+
+		check ("alter temporary system function function1 as 'org.apache.fink.function.function1'",
+			"ALTER TEMPORARY SYSTEM FUNCTION `FUNCTION1` AS 'org.apache.fink.function.function1'");
+
+		check("alter temporary system function function1 as 'org.apache.fink.function.function1' language java",
+			"ALTER TEMPORARY SYSTEM FUNCTION `FUNCTION1` AS 'org.apache.fink.function.function1' LANGUAGE JAVA");
+	}
+
+	@Test
+	public void testShowFuntions() {
+		check("show functions", "SHOW FUNCTIONS");
+		check("show functions db1", "SHOW FUNCTIONS `DB1`");
+		check("show functions catalog1.db1", "SHOW FUNCTIONS `CATALOG1`.`DB1`");
+	}
+
+	@Test
+	public void testShowTables() {
+		check("show tables", "SHOW TABLES");
+	}
+
+	@Test
+	public void testDescribeTable() {
+		check("describe tbl", "DESCRIBE `TBL`");
+		check("describe catlog1.db1.tbl", "DESCRIBE `CATLOG1`.`DB1`.`TBL`");
+		check("describe extended db1", "DESCRIBE EXTENDED `DB1`");
+	}
+
+	/**
+	 * Here we override the super method to avoid test error from `describe statement` supported in original calcite.
+	 */
+	@Override
+	public void testDescribeStatement() {
+	}
+
+	@Test
+	public void testAlterTable() {
+		check("alter table t1 rename to t2", "ALTER TABLE `T1` RENAME TO `T2`");
+		check("alter table c1.d1.t1 rename to t2", "ALTER TABLE `C1`.`D1`.`T1` RENAME TO `T2`");
+		check("alter table t1 set ('key1'='value1')",
+			"ALTER TABLE `T1` SET (\n" +
+			"  'key1' = 'value1'\n" +
+			")");
+	}
+
+	@Test
 	public void testCreateTable() {
+		conformance0 = FlinkSqlConformance.HIVE;
 		check("CREATE TABLE tbl1 (\n" +
 				"  a bigint,\n" +
 				"  h varchar, \n" +
@@ -107,6 +251,7 @@ public class FlinkSqlParserImplTest extends SqlParserTest {
 
 	@Test
 	public void testCreateTableWithComment() {
+		conformance0 = FlinkSqlConformance.HIVE;
 		check("CREATE TABLE tbl1 (\n" +
 				"  a bigint comment 'test column comment AAA.',\n" +
 				"  h varchar, \n" +
@@ -141,6 +286,7 @@ public class FlinkSqlParserImplTest extends SqlParserTest {
 
 	@Test
 	public void testCreateTableWithPrimaryKeyAndUniqueKey() {
+		conformance0 = FlinkSqlConformance.HIVE;
 		check("CREATE TABLE tbl1 (\n" +
 				"  a bigint comment 'test column comment AAA.',\n" +
 				"  h varchar, \n" +
@@ -405,6 +551,7 @@ public class FlinkSqlParserImplTest extends SqlParserTest {
 
 	@Test
 	public void testCreateInvalidPartitionedTable() {
+		conformance0 = FlinkSqlConformance.HIVE;
 		String sql = "create table sls_stream1(\n" +
 			"  a bigint,\n" +
 			"  b VARCHAR,\n" +
@@ -415,7 +562,16 @@ public class FlinkSqlParserImplTest extends SqlParserTest {
 			") with ( 'x' = 'y', 'asd' = 'dada')";
 		sql(sql).node(new ValidationMatcher()
 			.fails("Partition column [C] not defined in columns, at line 6, column 3"));
+	}
 
+	@Test
+	public void testNotAllowedCreatePartition() {
+		conformance0 = FlinkSqlConformance.DEFAULT;
+		String sql = "create table sls_stream1(\n" +
+				"  a bigint,\n" +
+				"  b VARCHAR\n" +
+				") PARTITIONED BY (a^)^ with ( 'x' = 'y', 'asd' = 'dada')";
+		sql(sql).fails("Creating partitioned table is only allowed for HIVE dialect.");
 	}
 
 	@Test
@@ -470,7 +626,6 @@ public class FlinkSqlParserImplTest extends SqlParserTest {
 
 	@Test
 	public void testInsertPartitionSpecs() {
-		conformance0 = FlinkSqlConformance.HIVE;
 		final String sql1 = "insert into emps(x,y) partition (x='ab', y='bc') select * from emps";
 		final String expected = "INSERT INTO `EMPS` (`X`, `Y`)\n"
 			+ "PARTITION (`X` = 'ab', `Y` = 'bc')\n"
@@ -492,7 +647,6 @@ public class FlinkSqlParserImplTest extends SqlParserTest {
 
 	@Test
 	public void testInsertCaseSensitivePartitionSpecs() {
-		conformance0 = FlinkSqlConformance.HIVE;
 		final String expected = "INSERT INTO `emps` (`x`, `y`)\n"
 			+ "PARTITION (`x` = 'ab', `y` = 'bc')\n"
 			+ "(SELECT *\n"
@@ -504,7 +658,6 @@ public class FlinkSqlParserImplTest extends SqlParserTest {
 
 	@Test
 	public void testInsertExtendedColumnAsStaticPartition1() {
-		conformance0 = FlinkSqlConformance.HIVE;
 		String expected = "INSERT INTO `EMPS` EXTEND (`Z` BOOLEAN) (`X`, `Y`)\n"
 			+ "PARTITION (`Z` = 'ab')\n"
 			+ "(SELECT *\n"
@@ -515,7 +668,6 @@ public class FlinkSqlParserImplTest extends SqlParserTest {
 
 	@Test(expected = SqlParseException.class)
 	public void testInsertExtendedColumnAsStaticPartition2() {
-		conformance0 = FlinkSqlConformance.HIVE;
 		sql("insert into emps(x, y, z boolean) partition (z='ab') select * from emps")
 			.node(new ValidationMatcher()
 				.fails("Extended columns not allowed under the current SQL conformance level"));
@@ -523,7 +675,6 @@ public class FlinkSqlParserImplTest extends SqlParserTest {
 
 	@Test
 	public void testInsertOverwrite() {
-		conformance0 = FlinkSqlConformance.HIVE;
 		// non-partitioned
 		check("INSERT OVERWRITE myDB.myTbl SELECT * FROM src",
 			"INSERT OVERWRITE `MYDB`.`MYTBL`\n"
@@ -540,7 +691,6 @@ public class FlinkSqlParserImplTest extends SqlParserTest {
 
 	@Test
 	public void testInvalidUpsertOverwrite() {
-		conformance0 = FlinkSqlConformance.HIVE;
 		sql("UPSERT ^OVERWRITE^ myDB.myTbl SELECT * FROM src")
 			.fails("OVERWRITE expression is only used with INSERT statement.");
 	}
@@ -618,6 +768,48 @@ public class FlinkSqlParserImplTest extends SqlParserTest {
 	public void testCreateViewWithEmptyFields() {
 		String sql = "CREATE VIEW v1 AS SELECT 1";
 		sql(sql).node(new ValidationMatcher());
+	}
+
+	@Test
+	public void testCreateFunction() {
+		check("create function catalog1.db1.function1 as 'org.apache.fink.function.function1'",
+			"CREATE FUNCTION `CATALOG1`.`DB1`.`FUNCTION1` AS 'org.apache.fink.function.function1'");
+
+		check("create temporary function catalog1.db1.function1 as 'org.apache.fink.function.function1'",
+			"CREATE TEMPORARY FUNCTION `CATALOG1`.`DB1`.`FUNCTION1` AS 'org.apache.fink.function.function1'");
+
+		check("create temporary system function catalog1.db1.function1 as 'org.apache.fink.function.function1'",
+			"CREATE TEMPORARY SYSTEM FUNCTION `CATALOG1`.`DB1`.`FUNCTION1` AS 'org.apache.fink.function.function1'");
+
+		check("create temporary function db1.function1 as 'org.apache.fink.function.function1'",
+			"CREATE TEMPORARY FUNCTION `DB1`.`FUNCTION1` AS 'org.apache.fink.function.function1'");
+
+		check("create temporary function function1 as 'org.apache.fink.function.function1'",
+			"CREATE TEMPORARY FUNCTION `FUNCTION1` AS 'org.apache.fink.function.function1'");
+
+		check("create temporary function if not exists catalog1.db1.function1 as 'org.apache.fink.function.function1'",
+			"CREATE TEMPORARY FUNCTION IF NOT EXISTS `CATALOG1`.`DB1`.`FUNCTION1` AS 'org.apache.fink.function.function1'");
+
+		check("create temporary function function1 as 'org.apache.fink.function.function1' language java",
+			"CREATE TEMPORARY FUNCTION `FUNCTION1` AS 'org.apache.fink.function.function1' LANGUAGE JAVA");
+
+		check("create temporary system function  function1 as 'org.apache.fink.function.function1' language scala",
+			"CREATE TEMPORARY SYSTEM FUNCTION `FUNCTION1` AS 'org.apache.fink.function.function1' LANGUAGE SCALA");
+	}
+
+	@Test
+	public void testDropTemporaryFunction() {
+		check("drop temporary function catalog1.db1.function1",
+			"DROP TEMPORARY FUNCTION `CATALOG1`.`DB1`.`FUNCTION1`");
+
+		check("drop temporary system function catalog1.db1.function1",
+			"DROP TEMPORARY SYSTEM FUNCTION `CATALOG1`.`DB1`.`FUNCTION1`");
+
+		check("drop temporary function if exists catalog1.db1.function1",
+			"DROP TEMPORARY FUNCTION IF EXISTS `CATALOG1`.`DB1`.`FUNCTION1`");
+
+		check("drop temporary system function if exists catalog1.db1.function1",
+			"DROP TEMPORARY SYSTEM FUNCTION IF EXISTS `CATALOG1`.`DB1`.`FUNCTION1`");
 	}
 
 	/** Matcher that invokes the #validate() of the {@link ExtendedSqlNode} instance. **/

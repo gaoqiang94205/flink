@@ -17,17 +17,40 @@
  */
 package org.apache.flink.table.planner.plan.utils
 
+import org.apache.flink.api.common.typeinfo.BasicTypeInfo.{DOUBLE_TYPE_INFO, INT_TYPE_INFO, STRING_TYPE_INFO}
+import org.apache.flink.api.java.typeutils.RowTypeInfo
 import org.apache.flink.api.scala._
 import org.apache.flink.streaming.api.scala.StreamExecutionEnvironment
+import org.apache.flink.table.api.internal.TableEnvironmentImpl
 import org.apache.flink.table.api.scala.{StreamTableEnvironment, _}
+import org.apache.flink.table.api.{EnvironmentSettings, TableEnvironment}
 import org.apache.flink.table.planner.plan.`trait`.{MiniBatchInterval, MiniBatchMode}
+import org.apache.flink.table.planner.runtime.utils.BatchTableEnvUtil
+import org.apache.flink.table.planner.runtime.utils.BatchTestBase.row
 import org.apache.flink.table.planner.utils.TableTestUtil
 
 import org.apache.calcite.sql.SqlExplainLevel
 import org.junit.Assert.assertEquals
-import org.junit.Test
+import org.junit.{Before, Test}
+
+import scala.collection.Seq
 
 class FlinkRelOptUtilTest {
+
+  var tableEnv: TableEnvironment = _
+
+  @Before
+  def before(): Unit = {
+    val settings = EnvironmentSettings.newInstance().useBlinkPlanner().build()
+    val tEnv = TableEnvironmentImpl.create(settings)
+    BatchTableEnvUtil.registerCollection(
+      tEnv,
+      "MyTable",
+      Seq(row("Mike", 1, 12.3, "Smith")),
+      new RowTypeInfo(STRING_TYPE_INFO, INT_TYPE_INFO, DOUBLE_TYPE_INFO, STRING_TYPE_INFO),
+      "first, id, score, last")
+    tableEnv = tEnv
+  }
 
   @Test
   def testToString(): Unit = {
@@ -47,19 +70,18 @@ class FlinkRelOptUtilTest {
     val result = tableEnv.sqlQuery(sqlQuery)
     val rel = TableTestUtil.toRelNode(result)
 
-    // Ignore the attributes because the data stream table name is random.
     val expected1 =
       """
-        |LogicalProject
-        |+- LogicalJoin
-        |   :- LogicalProject
-        |   :  +- LogicalFilter
-        |   :     +- LogicalTableScan
-        |   +- LogicalProject
-        |      +- LogicalFilter
-        |         +- LogicalTableScan
+        |LogicalProject(a=[$0], c=[$1], a0=[$2], c0=[$3])
+        |+- LogicalJoin(condition=[=($0, $2)], joinType=[inner])
+        |   :- LogicalProject(a=[$0], c=[$2])
+        |   :  +- LogicalFilter(condition=[>($1, 50)])
+        |   :     +- LogicalTableScan(table=[[default_catalog, default_database, MyTable]])
+        |   +- LogicalProject(a=[*($0, 2)], c=[$2])
+        |      +- LogicalFilter(condition=[<($1, 50)])
+        |         +- LogicalTableScan(table=[[default_catalog, default_database, MyTable]])
       """.stripMargin
-    assertEquals(expected1.trim, FlinkRelOptUtil.toString(rel, SqlExplainLevel.NO_ATTRIBUTES).trim)
+    assertEquals(expected1.trim, FlinkRelOptUtil.toString(rel).trim)
 
     val expected2 =
       """
@@ -73,6 +95,39 @@ class FlinkRelOptUtilTest {
         |         +- LogicalTableScan
       """.stripMargin
     assertEquals(expected2.trim, FlinkRelOptUtil.toString(rel, SqlExplainLevel.NO_ATTRIBUTES).trim)
+  }
+
+  @Test
+  def testGetDigestWithDynamicFunction(): Unit = {
+    val table = tableEnv.sqlQuery(
+      """
+        |(SELECT id AS random FROM MyTable ORDER BY rand() LIMIT 1)
+        |INTERSECT
+        |(SELECT id AS random FROM MyTable ORDER BY rand() LIMIT 1)
+        |INTERSECT
+        |(SELECT id AS random FROM MyTable ORDER BY rand() LIMIT 1)
+      """.stripMargin)
+    val rel = TableTestUtil.toRelNode(table)
+    val expected = TableTestUtil.readFromResource("/digest/testGetDigestWithDynamicFunction.out")
+    assertEquals(expected, FlinkRelOptUtil.getDigest(rel))
+  }
+
+  @Test
+  def testGetDigestWithDynamicFunctionView(): Unit = {
+    val view = tableEnv.sqlQuery("SELECT id AS random FROM MyTable ORDER BY rand() LIMIT 1")
+    tableEnv.registerTable("MyView", view)
+    val table = tableEnv.sqlQuery(
+      """
+        |(SELECT * FROM MyView)
+        |INTERSECT
+        |(SELECT * FROM MyView)
+        |INTERSECT
+        |(SELECT * FROM MyView)
+      """.stripMargin)
+    val rel = TableTestUtil.toRelNode(table).accept(new ExpandTableScanShuttle())
+    val expected = TableTestUtil.readFromResource(
+      "/digest/testGetDigestWithDynamicFunctionView.out")
+    assertEquals(expected, FlinkRelOptUtil.getDigest(rel))
   }
 
   @Test

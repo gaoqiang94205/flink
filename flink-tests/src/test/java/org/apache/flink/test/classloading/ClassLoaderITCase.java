@@ -19,24 +19,25 @@
 package org.apache.flink.test.classloading;
 
 import org.apache.flink.api.common.JobID;
+import org.apache.flink.api.common.JobStatus;
 import org.apache.flink.client.program.ClusterClient;
 import org.apache.flink.client.program.MiniClusterClient;
 import org.apache.flink.client.program.PackagedProgram;
 import org.apache.flink.client.program.ProgramInvocationException;
 import org.apache.flink.configuration.CheckpointingOptions;
 import org.apache.flink.configuration.Configuration;
+import org.apache.flink.configuration.MemorySize;
 import org.apache.flink.configuration.TaskManagerOptions;
 import org.apache.flink.core.fs.Path;
 import org.apache.flink.runtime.client.JobCancellationException;
 import org.apache.flink.runtime.client.JobStatusMessage;
-import org.apache.flink.runtime.jobgraph.JobStatus;
 import org.apache.flink.runtime.testutils.MiniClusterResource;
 import org.apache.flink.runtime.testutils.MiniClusterResourceConfiguration;
 import org.apache.flink.streaming.util.TestStreamEnvironment;
 import org.apache.flink.test.testdata.KMeansData;
 import org.apache.flink.test.util.SuccessException;
 import org.apache.flink.test.util.TestEnvironment;
-import org.apache.flink.testutils.junit.category.AlsoRunWithSchedulerNG;
+import org.apache.flink.testutils.junit.category.AlsoRunWithLegacyScheduler;
 import org.apache.flink.util.ExceptionUtils;
 import org.apache.flink.util.TestLogger;
 
@@ -69,7 +70,7 @@ import static org.junit.Assert.fail;
 /**
  * Test job classloader.
  */
-@Category(AlsoRunWithSchedulerNG.class)
+@Category(AlsoRunWithLegacyScheduler.class)
 public class ClassLoaderITCase extends TestLogger {
 
 	private static final Logger LOG = LoggerFactory.getLogger(ClassLoaderITCase.class);
@@ -89,6 +90,9 @@ public class ClassLoaderITCase extends TestLogger {
 	private static final String CUSTOM_KV_STATE_JAR_PATH = "custom_kv_state-test-jar.jar";
 
 	private static final String CHECKPOINTING_CUSTOM_KV_STATE_JAR_PATH = "checkpointing_custom_kv_state-test-jar.jar";
+
+	private static final String CLASSLOADING_POLICY_JAR_PATH = "classloading_policy-test-jar.jar";
+
 
 	@ClassRule
 	public static final TemporaryFolder FOLDER = new TemporaryFolder();
@@ -112,7 +116,7 @@ public class ClassLoaderITCase extends TestLogger {
 				FOLDER.newFolder().getAbsoluteFile().toURI().toString());
 
 		// required as we otherwise run out of memory
-		config.setString(TaskManagerOptions.LEGACY_MANAGED_MEMORY_SIZE, "80m");
+		config.set(TaskManagerOptions.MANAGED_MEMORY_SIZE, MemorySize.parse("80m"));
 
 		miniClusterResource = new MiniClusterResource(
 			new MiniClusterResourceConfiguration.Builder()
@@ -383,5 +387,77 @@ public class ClassLoaderITCase extends TestLogger {
 		// make sure, the execution is finished to not influence other test methods
 		invokeThread.join(deadline.timeLeft().toMillis());
 		assertFalse("Program invoke thread still running", invokeThread.isAlive());
+	}
+
+	@Test
+	public void testProgramWithChildFirstClassLoader() throws IOException, ProgramInvocationException {
+		// We have two files named test-resource in src/resource (parent classloader classpath) and
+		// tmp folders (child classloader classpath) respectively.
+		String childResourceDirName = "child0";
+		String testResourceName = "test-resource";
+		File childResourceDir = FOLDER.newFolder(childResourceDirName);
+		File childResource = new File(childResourceDir, testResourceName);
+		assertTrue(childResource.createNewFile());
+
+		TestStreamEnvironment.setAsContext(
+			miniClusterResource.getMiniCluster(),
+			parallelism,
+			Collections.singleton(new Path(CLASSLOADING_POLICY_JAR_PATH)),
+			Collections.emptyList());
+
+		// child-first classloading
+		Configuration childFirstConf = new Configuration();
+		childFirstConf.setString("classloader.resolve-order", "child-first");
+
+		final PackagedProgram childFirstProgram = PackagedProgram.newBuilder()
+			.setJarFile(new File(CLASSLOADING_POLICY_JAR_PATH))
+			.setUserClassPaths(Collections.singletonList(childResourceDir.toURI().toURL()))
+			.setConfiguration(childFirstConf)
+			.setArguments(testResourceName, childResourceDirName)
+			.build();
+
+		final ClassLoader contextClassLoader = Thread.currentThread().getContextClassLoader();
+		Thread.currentThread().setContextClassLoader(childFirstProgram.getUserCodeClassLoader());
+		try {
+			childFirstProgram.invokeInteractiveModeForExecution();
+		} finally {
+			Thread.currentThread().setContextClassLoader(contextClassLoader);
+		}
+	}
+
+	@Test
+	public void testProgramWithParentFirstClassLoader() throws IOException, ProgramInvocationException {
+		// We have two files named test-resource in src/resource (parent classloader classpath) and
+		// tmp folders (child classloader classpath) respectively.
+		String childResourceDirName = "child1";
+		String testResourceName = "test-resource";
+		File childResourceDir = FOLDER.newFolder(childResourceDirName);
+		File childResource = new File(childResourceDir, testResourceName);
+		assertTrue(childResource.createNewFile());
+
+		TestStreamEnvironment.setAsContext(
+			miniClusterResource.getMiniCluster(),
+			parallelism,
+			Collections.singleton(new Path(CLASSLOADING_POLICY_JAR_PATH)),
+			Collections.emptyList());
+
+		// parent-first classloading
+		Configuration parentFirstConf = new Configuration();
+		parentFirstConf.setString("classloader.resolve-order", "parent-first");
+
+		final PackagedProgram parentFirstProgram = PackagedProgram.newBuilder()
+			.setJarFile(new File(CLASSLOADING_POLICY_JAR_PATH))
+			.setUserClassPaths(Collections.singletonList(childResourceDir.toURI().toURL()))
+			.setConfiguration(parentFirstConf)
+			.setArguments(testResourceName, "test-classes")
+			.build();
+
+		final ClassLoader contextClassLoader = Thread.currentThread().getContextClassLoader();
+		Thread.currentThread().setContextClassLoader(parentFirstProgram.getUserCodeClassLoader());
+		try {
+			parentFirstProgram.invokeInteractiveModeForExecution();
+		} finally {
+			Thread.currentThread().setContextClassLoader(contextClassLoader);
+		}
 	}
 }

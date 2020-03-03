@@ -18,6 +18,7 @@
 package org.apache.flink.streaming.api.graph;
 
 import org.apache.flink.annotation.Internal;
+import org.apache.flink.annotation.VisibleForTesting;
 import org.apache.flink.api.common.JobID;
 import org.apache.flink.api.common.functions.Function;
 import org.apache.flink.api.common.operators.ResourceSpec;
@@ -52,6 +53,7 @@ import org.apache.flink.streaming.api.operators.ChainingStrategy;
 import org.apache.flink.streaming.api.operators.InputSelectable;
 import org.apache.flink.streaming.api.operators.StreamOperatorFactory;
 import org.apache.flink.streaming.api.operators.UdfStreamOperatorFactory;
+import org.apache.flink.streaming.api.operators.YieldingOperatorFactory;
 import org.apache.flink.streaming.api.transformations.ShuffleMode;
 import org.apache.flink.streaming.runtime.partitioner.ForwardPartitioner;
 import org.apache.flink.streaming.runtime.partitioner.RescalePartitioner;
@@ -68,17 +70,21 @@ import org.slf4j.LoggerFactory;
 import javax.annotation.Nullable;
 
 import java.io.IOException;
+import java.math.BigDecimal;
 import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.Collection;
+import java.util.Collections;
 import java.util.HashMap;
 import java.util.HashSet;
+import java.util.IdentityHashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.Map.Entry;
 import java.util.Set;
 
 import static org.apache.flink.runtime.jobgraph.tasks.CheckpointCoordinatorConfiguration.MINIMAL_CHECKPOINT_TIME;
+import static org.apache.flink.util.Preconditions.checkState;
 
 /**
  * The StreamingJobGraphGenerator converts a {@link StreamGraph} into a {@link JobGraph}.
@@ -87,6 +93,8 @@ import static org.apache.flink.runtime.jobgraph.tasks.CheckpointCoordinatorConfi
 public class StreamingJobGraphGenerator {
 
 	private static final Logger LOG = LoggerFactory.getLogger(StreamingJobGraphGenerator.class);
+
+	private static final int MANAGED_MEMORY_FRACTION_SCALE = 16;
 
 	// ------------------------------------------------------------------------
 
@@ -162,6 +170,13 @@ public class StreamingJobGraphGenerator {
 		setPhysicalEdges();
 
 		setSlotSharingAndCoLocation();
+
+		setManagedMemoryFraction(
+			Collections.unmodifiableMap(jobVertices),
+			Collections.unmodifiableMap(vertexConfigs),
+			Collections.unmodifiableMap(chainedConfigs),
+			id -> streamGraph.getStreamNode(id).getMinResources(),
+			id -> streamGraph.getStreamNode(id).getManagedMemoryWeight());
 
 		configureCheckpointing();
 
@@ -467,8 +482,7 @@ public class StreamingJobGraphGenerator {
 		config.setVertexID(vertexID);
 		config.setBufferTimeout(vertex.getBufferTimeout());
 
-		config.setTypeSerializerIn1(vertex.getTypeSerializerIn1());
-		config.setTypeSerializerIn2(vertex.getTypeSerializerIn2());
+		config.setTypeSerializersIn(vertex.getTypeSerializersIn());
 		config.setTypeSerializerOut(vertex.getTypeSerializerOut());
 
 		// iterate edges, find sideOutput edges create and save serializers for each outputTag type
@@ -529,10 +543,10 @@ public class StreamingJobGraphGenerator {
 
 		physicalEdgesInOrder.add(edge);
 
-		Integer downStreamvertexID = edge.getTargetId();
+		Integer downStreamVertexID = edge.getTargetId();
 
 		JobVertex headVertex = jobVertices.get(headOfChain);
-		JobVertex downStreamVertex = jobVertices.get(downStreamvertexID);
+		JobVertex downStreamVertex = jobVertices.get(downStreamVertexID);
 
 		StreamConfig downStreamConfig = new StreamConfig(downStreamVertex.getConfiguration());
 
@@ -574,7 +588,7 @@ public class StreamingJobGraphGenerator {
 
 		if (LOG.isDebugEnabled()) {
 			LOG.debug("CONNECTED: {} - {} -> {}", partitioner.getClass().getSimpleName(),
-					headOfChain, downStreamvertexID);
+					headOfChain, downStreamVertexID);
 		}
 	}
 
@@ -582,20 +596,47 @@ public class StreamingJobGraphGenerator {
 		StreamNode upStreamVertex = streamGraph.getSourceVertex(edge);
 		StreamNode downStreamVertex = streamGraph.getTargetVertex(edge);
 
-		StreamOperatorFactory<?> headOperator = upStreamVertex.getOperatorFactory();
-		StreamOperatorFactory<?> outOperator = downStreamVertex.getOperatorFactory();
-
 		return downStreamVertex.getInEdges().size() == 1
-				&& outOperator != null
-				&& headOperator != null
 				&& upStreamVertex.isSameSlotSharingGroup(downStreamVertex)
-				&& outOperator.getChainingStrategy() == ChainingStrategy.ALWAYS
-				&& (headOperator.getChainingStrategy() == ChainingStrategy.HEAD ||
-					headOperator.getChainingStrategy() == ChainingStrategy.ALWAYS)
+				&& areOperatorsChainable(upStreamVertex, downStreamVertex, streamGraph)
 				&& (edge.getPartitioner() instanceof ForwardPartitioner)
 				&& edge.getShuffleMode() != ShuffleMode.BATCH
 				&& upStreamVertex.getParallelism() == downStreamVertex.getParallelism()
 				&& streamGraph.isChainingEnabled();
+	}
+
+	@VisibleForTesting
+	static boolean areOperatorsChainable(
+			StreamNode upStreamVertex,
+			StreamNode downStreamVertex,
+			StreamGraph streamGraph) {
+		StreamOperatorFactory<?> upStreamOperator = upStreamVertex.getOperatorFactory();
+		StreamOperatorFactory<?> downStreamOperator = downStreamVertex.getOperatorFactory();
+		if (downStreamOperator == null || upStreamOperator == null) {
+			return false;
+		}
+
+		if (upStreamOperator.getChainingStrategy() == ChainingStrategy.NEVER ||
+			downStreamOperator.getChainingStrategy() != ChainingStrategy.ALWAYS) {
+			return false;
+		}
+
+		// yielding operators cannot be chained to legacy sources
+		if (downStreamOperator instanceof YieldingOperatorFactory) {
+			// unfortunately the information that vertices have been chained is not preserved at this point
+			return !getHeadOperator(upStreamVertex, streamGraph).isStreamSource();
+		}
+		return true;
+	}
+
+	/**
+	 * Backtraces the head of an operator chain.
+	 */
+	private static StreamOperatorFactory<?> getHeadOperator(StreamNode upStreamVertex, StreamGraph streamGraph) {
+		if (upStreamVertex.getInEdges().size() == 1 && isChainable(upStreamVertex.getInEdges().get(0), streamGraph)) {
+			return getHeadOperator(streamGraph.getSourceVertex(upStreamVertex.getInEdges().get(0)), streamGraph);
+		}
+		return upStreamVertex.getOperatorFactory();
 	}
 
 	private void setSlotSharingAndCoLocation() {
@@ -682,6 +723,114 @@ public class StreamingJobGraphGenerator {
 				constraint.f1.addVertex(vertex);
 			}
 		}
+	}
+
+	private static void setManagedMemoryFraction(
+			final Map<Integer, JobVertex> jobVertices,
+			final Map<Integer, StreamConfig> operatorConfigs,
+			final Map<Integer, Map<Integer, StreamConfig>> vertexChainedConfigs,
+			final java.util.function.Function<Integer, ResourceSpec> operatorResourceRetriever,
+			final java.util.function.Function<Integer, Integer> operatorManagedMemoryWeightRetriever) {
+
+		// all slot sharing groups in this job
+		final Set<SlotSharingGroup> slotSharingGroups = Collections.newSetFromMap(new IdentityHashMap<>());
+
+		// maps a job vertex ID to its head operator ID
+		final Map<JobVertexID, Integer> vertexHeadOperators = new HashMap<>();
+
+		// maps a job vertex ID to IDs of all operators in the vertex
+		final Map<JobVertexID, Set<Integer>> vertexOperators = new HashMap<>();
+
+		for (Entry<Integer, JobVertex> entry : jobVertices.entrySet()) {
+			final int headOperatorId = entry.getKey();
+			final JobVertex jobVertex = entry.getValue();
+
+			final SlotSharingGroup jobVertexSlotSharingGroup = jobVertex.getSlotSharingGroup();
+
+			checkState(jobVertexSlotSharingGroup != null, "JobVertex slot sharing group must not be null");
+			slotSharingGroups.add(jobVertexSlotSharingGroup);
+
+			vertexHeadOperators.put(jobVertex.getID(), headOperatorId);
+
+			final Set<Integer> operatorIds = new HashSet<>();
+			operatorIds.add(headOperatorId);
+			operatorIds.addAll(vertexChainedConfigs.getOrDefault(headOperatorId, Collections.emptyMap()).keySet());
+			vertexOperators.put(jobVertex.getID(), operatorIds);
+		}
+
+		for (SlotSharingGroup slotSharingGroup : slotSharingGroups) {
+			setManagedMemoryFractionForSlotSharingGroup(
+				slotSharingGroup,
+				vertexHeadOperators,
+				vertexOperators,
+				operatorConfigs,
+				vertexChainedConfigs,
+				operatorResourceRetriever,
+				operatorManagedMemoryWeightRetriever);
+		}
+	}
+
+	private static void setManagedMemoryFractionForSlotSharingGroup(
+			final SlotSharingGroup slotSharingGroup,
+			final Map<JobVertexID, Integer> vertexHeadOperators,
+			final Map<JobVertexID, Set<Integer>> vertexOperators,
+			final Map<Integer, StreamConfig> operatorConfigs,
+			final Map<Integer, Map<Integer, StreamConfig>> vertexChainedConfigs,
+			final java.util.function.Function<Integer, ResourceSpec> operatorResourceRetriever,
+			final java.util.function.Function<Integer, Integer> operatorManagedMemoryWeightRetriever) {
+
+		final int groupManagedMemoryWeight = slotSharingGroup.getJobVertexIds().stream()
+			.flatMap(vid -> vertexOperators.get(vid).stream())
+			.mapToInt(operatorManagedMemoryWeightRetriever::apply)
+			.sum();
+
+		for (JobVertexID jobVertexID : slotSharingGroup.getJobVertexIds()) {
+			for (int operatorNodeId : vertexOperators.get(jobVertexID)) {
+				final StreamConfig operatorConfig = operatorConfigs.get(operatorNodeId);
+				final ResourceSpec operatorResourceSpec = operatorResourceRetriever.apply(operatorNodeId);
+				final int operatorManagedMemoryWeight = operatorManagedMemoryWeightRetriever.apply(operatorNodeId);
+				setManagedMemoryFractionForOperator(
+					operatorResourceSpec,
+					slotSharingGroup.getResourceSpec(),
+					operatorManagedMemoryWeight,
+					groupManagedMemoryWeight,
+					operatorConfig);
+			}
+
+			// need to refresh the chained task configs because they are serialized
+			final int headOperatorNodeId = vertexHeadOperators.get(jobVertexID);
+			final StreamConfig vertexConfig = operatorConfigs.get(headOperatorNodeId);
+			vertexConfig.setTransitiveChainedTaskConfigs(vertexChainedConfigs.get(headOperatorNodeId));
+		}
+	}
+
+	private static void setManagedMemoryFractionForOperator(
+			final ResourceSpec operatorResourceSpec,
+			final ResourceSpec groupResourceSpec,
+			final int operatorManagedMemoryWeight,
+			final int groupManagedMemoryWeight,
+			final StreamConfig operatorConfig) {
+
+		final double managedMemoryFraction;
+
+		if (groupResourceSpec.equals(ResourceSpec.UNKNOWN)) {
+			managedMemoryFraction = groupManagedMemoryWeight > 0
+				? getFractionRoundedDown(operatorManagedMemoryWeight, groupManagedMemoryWeight)
+				: 0.0;
+		} else {
+			final long groupManagedMemoryBytes = groupResourceSpec.getManagedMemory().getBytes();
+			managedMemoryFraction = groupManagedMemoryBytes > 0
+				? getFractionRoundedDown(operatorResourceSpec.getManagedMemory().getBytes(), groupManagedMemoryBytes)
+				: 0.0;
+		}
+
+		operatorConfig.setManagedMemoryFraction(managedMemoryFraction);
+	}
+
+	private static double getFractionRoundedDown(final long dividend, final long divisor) {
+		return BigDecimal.valueOf(dividend)
+			.divide(BigDecimal.valueOf(divisor), MANAGED_MEMORY_FRACTION_SCALE, BigDecimal.ROUND_DOWN)
+			.doubleValue();
 	}
 
 	private void configureCheckpointing() {
